@@ -1,0 +1,164 @@
+#include <pop7.h>
+
+// ================= Ultrasonic =================
+#define TRIG_PIN A5
+#define ECHO_PIN A6
+
+// ================= Line Sensor =================
+#define NUM_SENSORS 5
+
+// ================= Speed =================
+int speed_straight   = 45;
+int speed_mild_turn  = 30;
+int speed_sharp_turn = 20;
+
+// ================= PID =================
+float Kp = 0.05;
+float Kd = 2.0;
+float last_error = 0;
+
+// ================= System =================
+int min_val[NUM_SENSORS];
+int max_val[NUM_SENSORS];
+int max_pwm = 100;
+
+unsigned long last_glcd_time = 0;
+
+// ================= Prototypes =================
+long read_ultrasonic();
+void auto_calibrate();
+int read_position();
+
+// ================= Setup =================
+void setup() {
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  glcd(1,0,"Press OK");
+  glcd(2,0,"Calibrate");
+  sw_OK_press();
+
+  glcdClear();
+  glcd(1,0,"Auto Calib...");
+  auto_calibrate();
+
+  motor(1,0); motor(2,0);
+  beep(); sleep(200); beep();
+
+  glcdClear();
+  glcd(1,0,"Calib OK");
+  glcd(2,0,"Press Run");
+  sw_OK_press();
+
+  glcdClear();
+  glcd(1,0,"Running...");
+}
+
+// ================= Loop =================
+void loop() {
+
+  long dist = read_ultrasonic();
+
+  // ----- GLCD -----
+  if (millis() - last_glcd_time > 200) {
+    glcdClear();
+    glcd(0,0,"DIST:");
+    glcd(0,6,"%ld", dist);
+    glcd(0,11,"cm");
+
+    if (dist < 10)        glcd(1,0,"STATUS: STOP");
+    else if (dist < 30)   glcd(1,0,"STATUS: SLOW");
+    else                  glcd(1,0,"STATUS: RUN");
+
+    last_glcd_time = millis();
+  }
+
+  // ----- STOP -----
+  if (dist < 10) {
+    motor(1,0);
+    motor(2,0);
+    beep();
+    delay(50);
+    return;
+  }
+
+  // ----- Line PID -----
+  int position = read_position();
+  int error = position - 2000;
+  int abs_error = abs(error);
+
+  int base_speed;
+  if (abs_error >= 1500)       base_speed = speed_sharp_turn;
+  else if (abs_error >= 500)   base_speed = speed_mild_turn;
+  else                         base_speed = speed_straight;
+
+  if (dist >= 10 && dist < 30) base_speed = 15;
+
+  int P = error;
+  int D = error - last_error;
+  last_error = error;
+
+  int diff = (Kp * P) + (Kd * D);
+
+  int L = constrain(base_speed + diff, -max_pwm, max_pwm);
+  int R = constrain(base_speed - diff, -max_pwm, max_pwm);
+
+  motor(1, L);
+  motor(2, R);
+}
+
+// ================= Ultrasonic =================
+long read_ultrasonic() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long d = pulseIn(ECHO_PIN, HIGH, 10000);
+  if (d == 0) return 999;
+  return d * 0.034 / 2;
+}
+
+// ================= Calibrate =================
+void auto_calibrate() {
+  for(int i=0;i<NUM_SENSORS;i++){
+    min_val[i]=1023;
+    max_val[i]=0;
+  }
+
+  unsigned long t0 = millis();
+  while(millis()-t0 < 5000){
+    if(((millis()-t0)%600) < 300)
+      { motor(1,35); motor(2,-35); }
+    else
+      { motor(1,-35); motor(2,35); }
+
+    for(int i=0;i<NUM_SENSORS;i++){
+      int v = analog(i);
+      min_val[i] = min(min_val[i], v);
+      max_val[i] = max(max_val[i], v);
+    }
+  }
+}
+
+// ================= Read Position =================
+int read_position() {
+  long sum = 0;
+  long weighted = 0;
+
+  for(int i=0;i<NUM_SENSORS;i++){
+    int v = analog(i);
+    long m = (long)(v - min_val[i]) * 1000 /
+             max(1, max_val[i] - min_val[i]);
+    m = constrain(m, 0, 1000);
+
+    weighted += m * (i * 1000);
+    sum += m;
+  }
+
+  if (sum == 0)
+    return (last_error < 0) ? 0 : 4000;
+
+  return weighted / sum;
+}
