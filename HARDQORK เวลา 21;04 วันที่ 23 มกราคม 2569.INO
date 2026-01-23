@@ -1,0 +1,276 @@
+#include <pop7.h>
+
+// =============================================================
+//  ส่วนที่ 1: พื้นที่ปรับแต่ง
+// =============================================================
+
+int APPROACH_TIME = 1950; 
+int BACK_TIME_UTURN = 450; 
+
+int NormalSpeed = 25;  
+int SlowSpeed   = 10;  
+int ADJUST_TIME = 0;   
+
+// --- Defines (แก้ถูกต้อง: ไม่มีวงเล็บ) ---
+#define WG   401,403,304,301,303,402
+#define WGB  304,401,403,301,303,402
+#define RU   304,302,303,120
+
+
+// รหัสพื้นฐาน
+#define RT 100
+#define LT 110
+#define STOP 200
+
+// --- Mission List ---
+int MissionList[] = {
+   303 , 2 , RT , 2 , LT , 2 , LT , WGB , 1 , 120 , 1 , RT , 1 , LT , 2 , RU , 1 ,
+  1 , RT , 2 , LT , WGB , 1 , 120 , 1 , RT , 2 , LT , 2 , RU , 1 ,
+  1 , RT , 2 , LT , 1 , WGB , 1 , RT , 2 , LT , 4 , RU , 1 ,
+  1 , RT , 3 , LT ,  WGB , 1 , 120 , 1 , RT , 3 , LT , 2 , RU , 1 ,
+  1 , RT , 2 , 2 , LT ,  WGB , 1 , 120 , 1 , RT , 2 , LT , 2 , RU , 1 ,
+  1 , RT , 2 , LT , 1 , WGB , 1 , 120 , 1 , RT , 1 , LT , 1 , RT , 1 , LT  , 1 , 1 , RU , 1 ,
+STOP
+  };
+
+int MissionLength = sizeof(MissionList) / sizeof(int);
+
+int s1_Open = 90;    int s1_Close = 24;   //ถ้าคีบไม่ขึ้นปรับลด
+int s2_Open = 0;    int s2_Close = 76;    //ถ้าคีบไม่ขึ้นปรับเพิ่มก
+int s3_Down = 20;     int s3_Up = 105;      
+int BaseSpeed = NormalSpeed; 
+int TurnSpeed = 30;  
+float Kp =1.8;  float Kd = 31;
+
+// =============================================================
+//  ส่วนที่ 2: ระบบภายใน
+// =============================================================
+
+// --- PID SENSORS (A0-A4) ---
+#define NUM_SENSORS 5
+int sensor_pin[] = {0, 1, 2, 3, 4}; 
+int weight[]     = {-20, -10, 0, 10 , 20};
+int threshold[NUM_SENSORS];
+int sensor_min[NUM_SENSORS], sensor_max[NUM_SENSORS];
+
+// --- SIDE SENSORS (A5, A6) ---
+int PIN_SIDE_L = 5; 
+int PIN_SIDE_R = 6; 
+int th_SideL = 500, th_SideR = 500;
+int min_SideL = 1023, max_SideL = 0;
+int min_SideR = 1023, max_SideR = 0;
+
+int last_error = 0;
+int StepIndex = 0;   int CurrentCount = 0; 
+
+#define CMD_TURN_RIGHT 100
+#define CMD_TURN_LEFT  110
+#define CMD_U_TURN     120 
+#define CMD_STOP       200
+#define CMD_GRIP       301 
+#define CMD_RELEASE    302 
+#define CMD_LIFT_UP    303 
+#define CMD_LIFT_DOWN  304 
+#define CMD_SET_SLOW   401 
+#define CMD_SET_NORMAL 402 
+#define CMD_TIMED_MOVE 403
+
+// ฟังก์ชัน Servo
+void smoothMoveGripper(int start1, int end1, int start2, int end2) {
+  int steps = 40; 
+  for (int i = 0; i <= steps; i++) {
+    int c1 = map(i, 0, steps, start1, end1);
+    int c2 = map(i, 0, steps, start2, end2);
+    servo(1, c1); servo(2, c2); 
+    sleep(20); 
+  }
+  servo(1, end1); servo(2, end2);
+}
+void smoothMoveLift(int startAngle, int endAngle) {
+  int steps = 50; 
+  for (int i = 0; i <= steps; i++) {
+    int c = map(i, 0, steps, startAngle, endAngle);
+    servo(3, c); sleep(15); 
+  }
+  servo(3, endAngle);
+}
+
+// ฟังก์ชันเดินรถ
+int limit(int v, int min_val, int max_val) {
+  if(v < min_val) return min_val; if(v > max_val) return max_val; return v;
+}
+
+void AutoCalibrate() {
+  glcdClear(); setTextSize(1); glcd(0, 0, "Calibrating...");
+  servo(1, s1_Open); servo(2, s2_Open); servo(3, s3_Down); 
+  
+  for(int i=0; i<NUM_SENSORS; i++) { sensor_min[i]=1023; sensor_max[i]=0; }
+  min_SideL = 1023; max_SideL = 0;
+  min_SideR = 1023; max_SideR = 0;
+
+  // เพิ่มเวลาเป็น 3 วินาที (เพื่อให้ส่าย A5/A6 โดนเส้นทัน)
+  for(int t=0; t<600; t++) { 
+    if(t<60) motor(30,-30); else if(t<140) motor(-30,30); else motor(30,-30);
+    for(int i=0; i<NUM_SENSORS; i++) {
+      int val = analog(sensor_pin[i]);
+      if(val<sensor_min[i]) sensor_min[i]=val; if(val>sensor_max[i]) sensor_max[i]=val;
+    }
+    int valL = analog(PIN_SIDE_L);
+    int valR = analog(PIN_SIDE_R);
+    if(valL < min_SideL) min_SideL = valL; if(valL > max_SideL) max_SideL = valL;
+    if(valR < min_SideR) min_SideR = valR; if(valR > max_SideR) max_SideR = valR;
+    sleep(10);
+  }
+  motor(0,0);
+  
+  for(int i=0; i<NUM_SENSORS; i++) { threshold[i]=(sensor_min[i]+sensor_max[i])/2; }
+  th_SideL = (min_SideL + max_SideL) / 2;
+  th_SideR = (min_SideR + max_SideR) / 2;
+
+  glcdClear(); glcd(0,0,"Ready! Press OK"); OK();
+}
+
+int GetError() {
+  long sum=0; int cnt=0;
+  for(int i=0; i<NUM_SENSORS; i++) {
+    if(analog(sensor_pin[i]) < threshold[i]) { sum+=weight[i]; cnt++; }
+  }
+  if(cnt>=4) return 0; if(cnt==0) return last_error;
+  return sum/cnt;
+}
+
+void RunPID() {
+  int error = GetError();
+  int power = (int)(Kp*error + Kd*(error-last_error));
+  int L = limit(BaseSpeed-power, -40, 40);
+  int R = limit(BaseSpeed+power, -40, 40);
+  motor(1,L); motor(2,R); last_error = error;
+}
+
+// *** ฟังก์ชันเลี้ยวฉบับแก้ปัญหาหมุนเลย (Smart Turn) ***
+void ExecuteTurn(bool isRight) {
+  motor(1,0); motor(2,0); sleep(10); beep();
+  glcd(2,0, isRight ? "Turn R" : "Turn L");
+  
+  // 1. เดินหน้าจัดระเบียบ (A5/A6 อยู่หน้า ให้เดินนิดเดียวพอ)
+  
+
+  // 2. เริ่มหมุน (Blind Spin)
+  if(isRight) {
+    sl(TurnSpeed); sleep(120); 
+  } else {
+    sr(TurnSpeed); sleep(120); 
+  }
+
+  // 3. *** รอให้เซนเซอร์ริม (A0/A4) เจอเส้นก่อน ***
+  unsigned long st = millis();
+  if(isRight) {
+    
+     // เลี้ยวขวา รอ A4 (ขวาสุด) เจอเส้น
+     while(analog(4) > threshold[4] && millis() - st < 1500) sl(TurnSpeed);
+  } else {
+     // เลี้ยวซ้าย รอ A0 (ซ้ายสุด) เจอเส้น
+     while(analog(0) > threshold[0] && millis() - st < 1500) sr(TurnSpeed);
+  }
+
+  // 4. รอให้เซนเซอร์กลาง (A2) เจอเส้น (เข้าเซ็นเตอร์)
+  st = millis();
+  if(isRight) {
+    while(analog(2) > threshold[2] && millis() - st < 1000) sl(TurnSpeed); 
+  } else {
+    while(analog(2) > threshold[2] && millis() - st < 1000) sr(TurnSpeed);
+  }
+   
+  // 5. หยุด
+  motor(1, isRight ? TurnSpeed : -TurnSpeed); 
+  motor(2, isRight ? -TurnSpeed : TurnSpeed); sleep(50); // เบรกต้าน
+  ao(); sleep(300); last_error = 0;
+}
+
+void ExecuteUTurn() {
+  motor(1,0); motor(2,0); beep();
+  glcd(2,0, "Action: U-Turn");
+  
+  sleep(BACK_TIME_UTURN);
+  sr(TurnSpeed); sleep(550); 
+  unsigned long st = millis();
+  while(analog(2) > threshold[2] && millis() - st < 3000) { sr(TurnSpeed); }
+  motor(1, -TurnSpeed); motor(2, TurnSpeed); sleep(50);
+  ao(); sleep(300); last_error = 0;
+}
+
+// =============================================================
+//  ส่วนที่ 3: MAIN LOOP
+// =============================================================
+void setup() { 
+  setTextSize(2); 
+  BaseSpeed = NormalSpeed; 
+  AutoCalibrate(); 
+}
+
+void loop() {
+  if (StepIndex >= MissionLength) { ao(); glcd(0,0,"Mission Err!"); while(1); }
+
+  int Cmd = MissionList[StepIndex];
+
+  // 1. คำสั่งพิเศษ
+  if (Cmd == CMD_SET_SLOW)   { BaseSpeed = SlowSpeed;   beep(); StepIndex++; return; }
+  if (Cmd == CMD_SET_NORMAL) { BaseSpeed = NormalSpeed; beep(); StepIndex++; return; }
+
+  // 2. เดินจับเวลา
+  if (Cmd == CMD_TIMED_MOVE) {
+      unsigned long startTime = millis();
+      while(millis() - startTime < APPROACH_TIME) {
+        RunPID(); sleep(10);
+      }
+      motor(1,0); motor(2,0); sleep(320);
+      StepIndex++; CurrentCount=0; return;
+  }
+
+  // 3. Servo
+  if (Cmd >= 300) {
+    motor(1,0); motor(2,0); 
+    if(Cmd == CMD_GRIP) smoothMoveGripper(s1_Open, s1_Close, s2_Open, s2_Close);
+    else if(Cmd == CMD_RELEASE) smoothMoveGripper(s1_Close, s1_Open, s2_Close, s2_Open);
+    else if(Cmd == CMD_LIFT_UP) smoothMoveLift(s3_Down, s3_Up);
+    else if(Cmd == CMD_LIFT_DOWN) smoothMoveLift(s3_Up, s3_Down);
+    sleep(100); StepIndex++; return;
+  }
+
+  // 4. Turn / U-Turn
+  if (Cmd == CMD_TURN_RIGHT) { ExecuteTurn(true);  StepIndex++; CurrentCount=0; return; }
+  if (Cmd == CMD_TURN_LEFT)  { ExecuteTurn(false); StepIndex++; CurrentCount=0; return; }
+  if (Cmd == CMD_U_TURN)     { ExecuteUTurn();     StepIndex++; CurrentCount=0; return; } 
+  if (Cmd == CMD_STOP)       { ao(); glcdClear(); glcd(1,0,"FINISH"); beep(); while(1); }
+
+  // 5. เดินตามเส้น + เช็คแยกด้วย A5/A6 (Side Sensors)
+  
+  bool SideL = analog(PIN_SIDE_L) < th_SideL;
+  bool SideR = analog(PIN_SIDE_R) < th_SideR;
+  
+  if(SideL && SideR) { 
+      sleep(10); // Debounce
+      if(analog(PIN_SIDE_L) < th_SideL && analog(PIN_SIDE_R) < th_SideR) {
+        CurrentCount++; 
+        beep(); 
+        
+        if(CurrentCount >= Cmd) {
+          
+           motor(1, -BaseSpeed); motor(2, -BaseSpeed); sleep(50);
+           motor(1, 0); motor(2, 0); sleep(200);
+           if (ADJUST_TIME != 0) {
+              if(ADJUST_TIME > 0) { motor(1,BaseSpeed); motor(2,BaseSpeed); sleep(ADJUST_TIME); }
+              else { motor(1,-BaseSpeed); motor(2,-BaseSpeed); sleep(abs(ADJUST_TIME)); }
+           }
+           motor(1,0); motor(2,0); sleep(100); 
+           StepIndex++; CurrentCount = 0;
+        } else {
+           motor(1, BaseSpeed); motor(2, BaseSpeed); 
+           sleep(160); // เดินข้ามแยก
+        }
+      }
+  } else {
+    
+      RunPID();
+  }
+}
